@@ -1,0 +1,66 @@
+name: Build Docker Container & push to DO Registry
+
+on: 
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request: 
+    branches: [ main ]
+
+jobs:
+  test_django_job:
+    uses: kumaradityaraj/Django-Kubernetes/.github/workflows/test-django.yaml@main
+  build:
+    runs-on: ubuntu-latest
+    needs: [test_django_job]
+    env: 
+      DJANGO_SECRET_KEY: test-key-not-good-maybe-make-one-better
+      CLUSTER_NAME: django-k8s
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+    - name: Install doclt
+      uses: digitalocean/action-doctl@v2
+      with:
+        token: ${{ secrets.DO_API_KEY }}
+    - name: Login to DO Container Registry with short-lived creds
+      run: doctl registry login --expiry-seconds 1200
+    - name: Build container image
+      working-directory: ./web
+      run: |
+        docker build -f Dockerfile \
+        .
+    - name: Push image
+      run: |
+        docker push
+    - name: K8s cluster kubeconfig file with/ short-lived creds
+      run: |
+        doctl kubernetes cluster kubeconfig save --expiry-seconds 600 ${{ env.CLUSTER_NAME }}
+    -name: Update deployments secrets:
+      run: | 
+        cat <<EOF >> web/.env.prod
+        DJANGO_SUPERUSER_USERNAME=admin
+        DJANGO_SUPERUSER_PASSWORD=mydjangopw
+        DJANGO_SUPERUSER_EMAIL=4920forupsc@gmail.com
+        DJANGO_SECRET_KEY=fix_this_later
+        DB_IGNORE_SSL=true
+        POSTGRES_READY=0
+        POSTGRES_DB=dockerdc
+        POSTGRES_PASSWORD=mysecretpassword
+        POSTGRES_USER=myuser
+        POSTGRES_HOST=localhost
+        POSTGRES_PORT=5434
+        EOF
+        kubectl delete django-k8s-web-prod-env
+        kubectl create secret generic django-k8s-web-prod-env --from-env-file=web/.env.prod
+    - name: Update Deployment image
+      run: |
+        kubectl set image deployment/django-k8s-web-development
+    - name: Wait for rollout to finish
+      run: |
+        kubectl rollout status deployment/django-k8s-web-deployment
+    - name: Migrate Database Command
+      run: |
+        export SINGLE_POD_NAME=$(kubectl get pod -l app=django-k8s-web-deployment -o jsonpath="{.items[0].metadata.name}")
+        kubectl exec -it $SINGLE_POD_NAME --bash /app/migrate.sh    
